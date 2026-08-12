@@ -4,3 +4,4 @@ sympy
 schemdraw
 pydantic
 pyparsing
+matplotlib
