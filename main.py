@@ -1,3 +1,7 @@
+import matplotlib
+# Force Matplotlib to non-interactive headless mode BEFORE importing schemdraw
+matplotlib.use('Agg')
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -10,7 +14,6 @@ import math
 
 app = FastAPI()
 
-# Configure CORS cleanly for production
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -21,17 +24,15 @@ app.add_middleware(
 
 class LogicRequest(BaseModel):
     query: str
-    gate_type: str = "standard"  # "standard", "nand", "nor"
+    gate_type: str = "standard"
 
 @app.get("/")
 def health_check():
-    """Root route so Render health pings return HTTP 200 OK instead of 404."""
     return {"status": "ok", "message": "Logic Circuit Generator API is active."}
 
 def parse_input_to_minterms(query: str):
     query = query.strip()
 
-    # Format 1: Minterm notation e.g., m(1,2,5)
     match_m = re.search(r'm\(([\d,\s]+)\)', query, re.IGNORECASE)
     if match_m:
         minterms = [int(x.strip()) for x in match_m.group(1).split(',')]
@@ -39,7 +40,6 @@ def parse_input_to_minterms(query: str):
         num_vars = max(len(bin(max_val)) - 2, 2)
         return minterms, num_vars
 
-    # Format 2: Truth Table output array e.g., "0,1,1,1"
     clean_query = query.replace(",", "").replace(" ", "")
     if all(c in '01' for c in clean_query) and len(clean_query) > 1:
         minterms = [i for i, bit in enumerate(clean_query) if bit == '1']
@@ -116,8 +116,11 @@ def sym_to_nor_str(expr):
     
     return str(expr)
 
+# CRITICAL FIX: Changed from 'async def' to standard 'def'
+# This forces FastAPI to run heavy CPU tasks in a separate threadpool,
+# preventing the main event loop from freezing.
 @app.post("/solve")
-async def solve_logic(request: LogicRequest):
+def solve_logic(request: LogicRequest):
     try:
         query = request.query
         gate_type = request.gate_type.lower()
@@ -132,7 +135,6 @@ async def solve_logic(request: LogicRequest):
 
         var_symbols = generate_variable_symbols(num_vars)
         
-        # Ground case
         if not minterms:
             return {
                 "sop": "0", 
@@ -141,7 +143,6 @@ async def solve_logic(request: LogicRequest):
                 "svg": "<svg width='240' height='60'><text x='20' y='35' font-family='sans-serif' font-size='16'>Output = 0 (Ground)</text></svg>"
             }
 
-        # VCC case
         if len(minterms) == (2 ** num_vars):
             return {
                 "sop": "1", 
@@ -153,7 +154,6 @@ async def solve_logic(request: LogicRequest):
         sop_expr = SOPform(var_symbols, minterms)
         pos_expr = POSform(var_symbols, minterms)
 
-        # Direct wire pass-through
         if isinstance(sop_expr, sympy.Symbol):
             var_name = str(sop_expr)
             return {
