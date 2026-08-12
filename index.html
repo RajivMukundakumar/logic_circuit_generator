@@ -76,7 +76,7 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ query: input, gate_type: gateType })
-                });
+                    });
 
                 if (!response.ok) {
                     const errData = await response.json();
