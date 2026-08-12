@@ -10,10 +10,11 @@ import math
 
 app = FastAPI()
 
+# Configure CORS cleanly for production
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -22,10 +23,15 @@ class LogicRequest(BaseModel):
     query: str
     gate_type: str = "standard"  # "standard", "nand", "nor"
 
+@app.get("/")
+def health_check():
+    """Root route so Render health pings return HTTP 200 OK instead of 404."""
+    return {"status": "ok", "message": "Logic Circuit Generator API is active."}
+
 def parse_input_to_minterms(query: str):
     query = query.strip()
 
-    # Format 1: Minterm notation e.g., m(1,2,5) or m(2,3,6,7,8,10,12,14)
+    # Format 1: Minterm notation e.g., m(1,2,5)
     match_m = re.search(r'm\(([\d,\s]+)\)', query, re.IGNORECASE)
     if match_m:
         minterms = [int(x.strip()) for x in match_m.group(1).split(',')]
@@ -33,7 +39,7 @@ def parse_input_to_minterms(query: str):
         num_vars = max(len(bin(max_val)) - 2, 2)
         return minterms, num_vars
 
-    # Format 2: Truth Table output array e.g., "0,0,1,1,0,0,1,1,1,0,1,0,1,0,1,0"
+    # Format 2: Truth Table output array e.g., "0,1,1,1"
     clean_query = query.replace(",", "").replace(" ", "")
     if all(c in '01' for c in clean_query) and len(clean_query) > 1:
         minterms = [i for i, bit in enumerate(clean_query) if bit == '1']
@@ -44,13 +50,11 @@ def parse_input_to_minterms(query: str):
     return None, None
 
 def generate_variable_symbols(num_vars: int):
-    """Generates standard variable names A, B, C, D... or X0, X1 for large variable counts."""
     if num_vars <= 26:
         return [sympy.Symbol(chr(65 + i)) for i in range(num_vars)]
     return [sympy.Symbol(f"X{i}") for i in range(num_vars)]
 
 def sym_to_nand_str(expr):
-    """Converts SOP expression into a De Morgan NAND-compatible tree string."""
     if isinstance(expr, sympy.Symbol):
         return str(expr)
     if isinstance(expr, sympy.Not):
@@ -82,7 +86,6 @@ def sym_to_nand_str(expr):
     return str(expr)
 
 def sym_to_nor_str(expr):
-    """Converts POS expression into a De Morgan NOR-compatible tree string."""
     if isinstance(expr, sympy.Symbol):
         return str(expr)
     if isinstance(expr, sympy.Not):
@@ -115,72 +118,75 @@ def sym_to_nor_str(expr):
 
 @app.post("/solve")
 async def solve_logic(request: LogicRequest):
-    query = request.query
-    gate_type = request.gate_type.lower()
-    
-    minterms, num_vars = parse_input_to_minterms(query)
-    
-    if minterms is None:
-        raise HTTPException(
-            status_code=400, 
-            detail="Invalid input format. Provide truth table bits (e.g. 0,1,1,0) or minterms m(0,1,3)."
-        )
-
-    var_symbols = generate_variable_symbols(num_vars)
-    
-    # Handle ground/constant 0 case
-    if not minterms:
-        return {
-            "sop": "0", 
-            "pos": "0", 
-            "explanation": "Output is constant 0 (Ground).",
-            "svg": "<svg width='240' height='60'><text x='20' y='35' font-family='sans-serif' font-size='16'>Output = 0 (Ground)</text></svg>"
-        }
-
-    # Handle constant 1 case (all minterms present)
-    if len(minterms) == (2 ** num_vars):
-        return {
-            "sop": "1", 
-            "pos": "1", 
-            "explanation": "Output is constant 1 (VCC).",
-            "svg": "<svg width='240' height='60'><text x='20' y='35' font-family='sans-serif' font-size='16'>Output = 1 (VCC)</text></svg>"
-        }
-
-    sop_expr = SOPform(var_symbols, minterms)
-    pos_expr = POSform(var_symbols, minterms)
-
-    # Handle single-variable direct wire pass-through
-    if isinstance(sop_expr, sympy.Symbol):
-        var_name = str(sop_expr)
-        return {
-            "sop": var_name,
-            "pos": var_name,
-            "explanation": f"Simplified directly to input variable {var_name}. No logic gates required.",
-            "svg": f"<svg width='240' height='60'><line x1='20' y1='30' x2='180' y2='30' stroke='black' stroke-width='2'/><text x='5' y='35' font-family='sans-serif'>{var_name}</text><text x='190' y='35' font-family='sans-serif'>Y</text></svg>"
-        }
-
-    # Build parse tree string based on user gate selection
-    if gate_type == "nand":
-        schem_expression = sym_to_nand_str(sop_expr)
-    elif gate_type == "nor":
-        schem_expression = sym_to_nor_str(pos_expr)
-    else:
-        schem_expression = str(sop_expr).replace('&', 'and').replace('|', 'or').replace('~', 'not ')
-
-    # Render schematic with schemdraw
     try:
-        drawing = logicparse(schem_expression)
-        svg_bytes = drawing.get_imagedata('svg')
-        svg_string = svg_bytes.decode('utf-8')
+        query = request.query
+        gate_type = request.gate_type.lower()
+        
+        minterms, num_vars = parse_input_to_minterms(query)
+        
+        if minterms is None:
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid input format. Enter truth table outputs (e.g. 0,1,1,0) or minterms m(0,1,3)."
+            )
+
+        var_symbols = generate_variable_symbols(num_vars)
+        
+        # Ground case
+        if not minterms:
+            return {
+                "sop": "0", 
+                "pos": "0", 
+                "explanation": "Output is constant 0 (Ground).",
+                "svg": "<svg width='240' height='60'><text x='20' y='35' font-family='sans-serif' font-size='16'>Output = 0 (Ground)</text></svg>"
+            }
+
+        # VCC case
+        if len(minterms) == (2 ** num_vars):
+            return {
+                "sop": "1", 
+                "pos": "1", 
+                "explanation": "Output is constant 1 (VCC).",
+                "svg": "<svg width='240' height='60'><text x='20' y='35' font-family='sans-serif' font-size='16'>Output = 1 (VCC)</text></svg>"
+            }
+
+        sop_expr = SOPform(var_symbols, minterms)
+        pos_expr = POSform(var_symbols, minterms)
+
+        # Direct wire pass-through
+        if isinstance(sop_expr, sympy.Symbol):
+            var_name = str(sop_expr)
+            return {
+                "sop": var_name,
+                "pos": var_name,
+                "explanation": f"Simplified directly to input variable {var_name}. No logic gates required.",
+                "svg": f"<svg width='240' height='60'><line x1='20' y1='30' x2='180' y2='30' stroke='black' stroke-width='2'/><text x='5' y='35' font-family='sans-serif'>{var_name}</text><text x='190' y='35' font-family='sans-serif'>Y</text></svg>"
+            }
+
+        if gate_type == "nand":
+            schem_expression = sym_to_nand_str(sop_expr)
+        elif gate_type == "nor":
+            schem_expression = sym_to_nor_str(pos_expr)
+        else:
+            schem_expression = str(sop_expr).replace('&', 'and').replace('|', 'or').replace('~', 'not ')
+
+        try:
+            drawing = logicparse(schem_expression)
+            svg_bytes = drawing.get_imagedata('svg')
+            svg_string = svg_bytes.decode('utf-8')
+        except Exception as e:
+            svg_string = f"<p class='text-red-500 font-mono text-sm'>Schematic generation error: {str(e)}</p>"
+
+        var_names_str = ", ".join([str(v) for v in var_symbols])
+        explanation = f"Processed {len(minterms)} minterms across {num_vars} variables ({var_names_str}). Implemented using {gate_type.upper()} gate logic."
+
+        return {
+            "sop": str(sop_expr),
+            "pos": str(pos_expr),
+            "explanation": explanation,
+            "svg": svg_string
+        }
+    except HTTPException:
+        raise
     except Exception as e:
-        svg_string = f"<p class='text-red-500 font-mono text-sm'>Schematic generation error: {str(e)}</p>"
-
-    var_names_str = ", ".join([str(v) for v in var_symbols])
-    explanation = f"Processed {len(minterms)} minterms across {num_vars} variables ({var_names_str}). Implemented using {gate_type.upper()} gate logic."
-
-    return {
-        "sop": str(sop_expr),
-        "pos": str(pos_expr),
-        "explanation": explanation,
-        "svg": svg_string
-    }
+        raise HTTPException(status_code=500, detail=f"Server calculation error: {str(e)}")
