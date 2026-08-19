@@ -6,16 +6,20 @@
     <title>Digital Logic & Universal Gate Generator</title>
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-gray-100 min-h-screen p-8 text-gray-800">
+<body class="bg-gray-100 min-h-screen p-4 md:p-8 text-gray-800">
 
-    <div class="max-w-5xl mx-auto bg-white p-8 rounded-lg shadow-md">
+    <div class="max-w-6xl mx-auto bg-white p-6 md:p-8 rounded-lg shadow-md">
         <h1 class="text-3xl font-bold mb-2 text-blue-600">Digital Logic & Universal Gate Generator</h1>
-        <p class="text-gray-600 mb-8">Enter minterms like <code class="bg-gray-200 px-1 rounded">m(0,1,2)</code> or truth table outputs like <code class="bg-gray-200 px-1 rounded">0,1,1,0</code>.</p>
+        <p class="text-gray-600 mb-6">
+            Enter a Boolean Expression (e.g. <code class="bg-gray-200 px-1 rounded">A'B + C</code>, <code class="bg-gray-200 px-1 rounded">A AND B</code>), 
+            Minterms <code class="bg-gray-200 px-1 rounded">m(0,1,2)</code>, Maxterms <code class="bg-gray-200 px-1 rounded">M(1,3)</code>, 
+            or Truth Table Outputs <code class="bg-gray-200 px-1 rounded">0,1,1,0</code>.
+        </p>
 
-        <div class="mb-8 p-6 bg-gray-50 border rounded grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div class="mb-8 p-6 bg-gray-50 border rounded-lg grid grid-cols-1 md:grid-cols-3 gap-4">
             <div class="col-span-1 md:col-span-2">
                 <label class="block text-sm font-bold mb-2">Input Logic Specification:</label>
-                <textarea id="userInput" rows="2" class="w-full p-3 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono" placeholder="e.g. m(0,1,2,5) or 0,1,1,0"></textarea>
+                <textarea id="userInput" rows="2" class="w-full p-3 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono" placeholder="e.g. A'B + C or m(0,1,2,5) or 0,1,1,1"></textarea>
             </div>
 
             <div class="col-span-1">
@@ -29,32 +33,46 @@
 
             <div class="col-span-1 md:col-span-3">
                 <button id="solveBtn" onclick="solveLogic()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded transition duration-200 disabled:opacity-50">
-                    Solve & Draw Circuit
+                    Solve & Generate Outputs
                 </button>
             </div>
         </div>
 
         <div id="loading" class="hidden text-center text-blue-600 font-bold mb-8 p-4 bg-blue-50 rounded border border-blue-200">
-            Analyzing logic and rendering schematics... <br>
-            <span class="text-xs text-gray-500 font-normal">(If Render is spinning up from idle, this may take up to 45 seconds)</span>
+            Analyzing logic, generating truth table, and rendering schematics... <br>
+            <span class="text-xs text-gray-500 font-normal">(If Render is waking up from idle, this may take up to 30 seconds)</span>
         </div>
 
         <div id="errorBox" class="hidden mb-8 p-4 bg-red-50 text-red-700 border border-red-200 rounded font-mono text-sm"></div>
 
-        <div id="results" class="hidden grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div class="p-6 border rounded shadow-sm">
-                <h2 class="text-xl font-bold mb-4 border-b pb-2">Simplified Expressions</h2>
-                <p class="mb-2"><strong>SOP:</strong> <span id="sopOutput" class="font-mono text-blue-700 font-semibold"></span></p>
-                <p><strong>POS:</strong> <span id="posOutput" class="font-mono text-blue-700 font-semibold"></span></p>
+        <div id="results" class="hidden space-y-6">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div class="p-6 border rounded shadow-sm bg-white">
+                    <h2 class="text-xl font-bold mb-4 border-b pb-2 text-gray-800">Simplified Expressions</h2>
+                    <p class="mb-2"><strong>SOP (Sum of Products):</strong> <br><span id="sopOutput" class="font-mono text-blue-700 font-bold text-lg"></span></p>
+                    <p><strong>POS (Product of Sums):</strong> <br><span id="posOutput" class="font-mono text-blue-700 font-bold text-lg"></span></p>
+                </div>
+
+                <div class="p-6 border rounded shadow-sm bg-gray-50">
+                    <h2 class="text-xl font-bold mb-4 border-b pb-2 text-gray-800">Minimization Summary</h2>
+                    <p id="explanation" class="text-sm leading-relaxed text-gray-700"></p>
+                </div>
             </div>
 
-            <div class="p-6 border rounded shadow-sm bg-gray-50">
-                <h2 class="text-xl font-bold mb-4 border-b pb-2">Minimization Summary</h2>
-                <p id="explanation" class="text-sm leading-relaxed text-gray-700"></p>
+            <!-- Truth Table Section -->
+            <div class="p-6 border rounded shadow-sm bg-white">
+                <h2 class="text-xl font-bold mb-4 border-b pb-2 text-gray-800">Generated Truth Table</h2>
+                <div class="overflow-x-auto max-h-80">
+                    <table class="w-full border-collapse text-center text-sm font-mono">
+                        <thead id="truthTableHeader" class="bg-blue-600 text-white sticky top-0"></thead>
+                        <tbody id="truthTableBody" class="divide-y divide-gray-200"></tbody>
+                    </table>
+                </div>
             </div>
 
-            <div class="col-span-1 md:col-span-2 p-6 border rounded shadow-sm">
-                <h2 class="text-xl font-bold mb-4 border-b pb-2">Logic Circuit Diagram</h2>
+            <!-- Schematic Diagram Section -->
+            <div class="p-6 border rounded shadow-sm bg-white">
+                <h2 class="text-xl font-bold mb-4 border-b pb-2 text-gray-800">Logic Circuit Diagram</h2>
                 <div id="circuitImage" class="flex justify-center items-center bg-gray-50 p-4 border border-dashed border-gray-300 min-h-[250px] overflow-x-auto">
                 </div>
             </div>
@@ -71,11 +89,10 @@
             const results = document.getElementById('results');
 
             if (!input) {
-                alert("Please enter a valid minterm or truth table output format.");
+                alert("Please enter a Boolean expression, minterm/maxterm, or truth table string.");
                 return;
             }
 
-            // Reset UI states
             loading.classList.remove('hidden');
             results.classList.add('hidden');
             errorBox.classList.add('hidden');
@@ -101,6 +118,9 @@
                 document.getElementById('explanation').innerText = data.explanation;
                 document.getElementById('circuitImage').innerHTML = data.svg;
 
+                // Render dynamic truth table
+                renderTruthTable(data.truth_table);
+
                 results.classList.remove('hidden');
 
             } catch (error) {
@@ -108,10 +128,43 @@
                 errorBox.innerText = `Error: ${error.message}`;
                 errorBox.classList.remove('hidden');
             } finally {
-                // ALWAYS run regardless of success or failure
                 loading.classList.add('hidden');
                 solveBtn.disabled = false;
             }
+        }
+
+        function renderTruthTable(tt) {
+            const headerRow = document.getElementById('truthTableHeader');
+            const tbody = document.getElementById('truthTableBody');
+
+            headerRow.innerHTML = '';
+            tbody.innerHTML = '';
+
+            if (!tt || !tt.headers || !tt.rows) return;
+
+            // Header columns
+            let trHead = document.createElement('tr');
+            tt.headers.forEach((h, idx) => {
+                let th = document.createElement('th');
+                th.className = "py-2 px-4 border " + (idx === tt.headers.length - 1 ? "bg-blue-800 font-bold" : "");
+                th.innerText = h;
+                trHead.appendChild(th);
+            });
+            headerRow.appendChild(trHead);
+
+            // Row values
+            tt.rows.forEach(row => {
+                let tr = document.createElement('tr');
+                tr.className = row[row.length - 1] === 1 ? "bg-blue-50 font-semibold" : "hover:bg-gray-50";
+                
+                row.forEach((val, idx) => {
+                    let td = document.createElement('td');
+                    td.className = "py-1.5 px-4 border " + (idx === row.length - 1 ? "text-blue-700 font-bold" : "");
+                    td.innerText = val;
+                    tr.appendChild(td);
+                });
+                tbody.appendChild(tr);
+            });
         }
     </script>
 </body>
