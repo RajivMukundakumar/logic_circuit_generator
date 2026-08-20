@@ -25,17 +25,8 @@
             <!-- Image Upload Input -->
             <div class="col-span-1">
                 <label class="block text-sm font-bold mb-2">Upload Photo / Screenshot:</label>
-                <input type="file" id="imageInput" accept="image/*" class="w-full p-2 border rounded text-xs bg-white focus:outline-none">
-                <p class="text-xs text-gray-500 mt-1">Upload circuit diagrams, truth tables, or handwritten logic notes.</p>
-            </div>
-
-            <!-- Options -->
-            <div class="col-span-1 md:col-span-2">
-                <label class="block text-sm font-bold mb-1">Gemini API Key (Required for Images & Word Problems):</label>
-                <input id="apiKey" type="password" class="w-full p-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-xs" placeholder="Enter Gemini API key">
-            </div>
-
-            <div class="col-span-1">
+                <input type="file" id="imageInput" accept="image/*" class="w-full p-2 border rounded text-xs bg-white focus:outline-none mb-3">
+                
                 <label class="block text-sm font-bold mb-1">Gate Implementation:</label>
                 <select id="gateType" class="w-full p-2 border rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white text-sm">
                     <option value="standard">Standard (AND / OR / NOT)</option>
@@ -104,7 +95,6 @@
         async function solveLogic() {
             const query = document.getElementById('userInput').value.trim();
             const gateType = document.getElementById('gateType').value;
-            const apiKey = document.getElementById('apiKey').value.trim();
             const imageInput = document.getElementById('imageInput');
             
             const solveBtn = document.getElementById('solveBtn');
@@ -139,8 +129,7 @@
                         query: query,
                         image_b64: imageB64,
                         image_mime: imageMime,
-                        gate_type: gateType,
-                        api_key: apiKey
+                        gate_type: gateType
                     })
                 });
 
@@ -155,7 +144,6 @@
                 document.getElementById('posOutput').innerText = data.pos;
                 document.getElementById('circuitImage').innerHTML = data.svg;
 
-                // Render Ordered Steps
                 renderSteps(data.steps);
                 renderKMap(data.kmap);
                 renderTruthTable(data.truth_table);
