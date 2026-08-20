@@ -27,14 +27,13 @@ app.add_middleware(
 
 class LogicRequest(BaseModel):
     query: str = ""
-    image_b64: str = ""       # Raw base64 string without data prefix
+    image_b64: str = ""       # Base64 encoded image string
     image_mime: str = "image/png"
     gate_type: str = "standard"  # "standard", "nand", "nor"
-    api_key: str = ""           # Gemini API key
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Logic Circuit & Multimodal Gemini API is active."}
+    return {"status": "ok", "message": "Logic Circuit & Gemini API is active."}
 
 def preprocess_boolean_expr(expr_str: str) -> str:
     s = expr_str.strip()
@@ -58,7 +57,6 @@ def preprocess_boolean_expr(expr_str: str) -> str:
     return s
 
 def try_deterministic_parse(query_str: str):
-    """Attempts regex parsing for standard expressions, minterms, maxterms, and truth tables."""
     query_str = query_str.strip()
     if not query_str:
         return None, None
@@ -105,11 +103,14 @@ def try_deterministic_parse(query_str: str):
 
     return None, None
 
-def parse_with_gemini(query: str, image_b64: str, image_mime: str, api_key: str):
-    """Uses Gemini 2.5 Flash to process word problems or photos into JSON minterms & ordered steps."""
-    key = api_key or os.environ.get("GEMINI_API_KEY", "")
+def parse_with_gemini(query: str, image_b64: str, image_mime: str):
+    """Uses server environment variable GEMINI_API_KEY to process requests."""
+    key = os.environ.get("GEMINI_API_KEY", "")
     if not key:
-        raise HTTPException(status_code=400, detail="Gemini API Key is required for word problems and image uploads.")
+        raise HTTPException(
+            status_code=500, 
+            detail="GEMINI_API_KEY environment variable is not configured on the Render server."
+        )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}"
     
@@ -276,7 +277,6 @@ def solve_logic(request: LogicRequest):
         if not query and not image_b64:
             raise HTTPException(status_code=400, detail="Please enter text/word problem or upload an image.")
 
-        # If an image is provided or standard deterministic parsing fails, delegate parsing to Gemini
         minterms = None
         var_symbols = None
 
@@ -284,7 +284,7 @@ def solve_logic(request: LogicRequest):
             minterms, var_symbols = try_deterministic_parse(query)
 
         if minterms is None or var_symbols is None:
-            minterms, var_symbols, steps = parse_with_gemini(query, image_b64, request.image_mime, request.api_key)
+            minterms, var_symbols, steps = parse_with_gemini(query, image_b64, request.image_mime)
         else:
             steps = [
                 "Step 1: Direct Logic Extraction - Recognized expression, minterms, or truth table format.",
@@ -306,7 +306,6 @@ def solve_logic(request: LogicRequest):
             pos_expr = POSform(var_symbols, minterms)
             sop_str, pos_str = str(sop_expr), str(pos_expr)
 
-        # Generate schematic SVG
         if sop_str in ["0", "1"]:
             svg_string = f"<svg width='240' height='60'><text x='20' y='35' font-family='sans-serif' font-size='16'>Output = {sop_str}</text></svg>"
         else:
