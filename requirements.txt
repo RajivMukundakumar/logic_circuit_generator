@@ -2,6 +2,7 @@ fastapi
 uvicorn
 sympy
 schemdraw
-pydantic
-pyparsing
 matplotlib
+pydantic
+requests
+pyparsing
