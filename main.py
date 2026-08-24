@@ -49,10 +49,7 @@ def get_pin(g, pin_name):
     raise AttributeError(f"Anchor '{pin_name}' not defined in Element.")
 
 def connect_orthogonal(d, start_pt, end_pt, x_mid):
-    """
-    Connects start_pt to end_pt using 90-degree right-angled lines:
-    (x1, y1) -> (x_mid, y1) -> (x_mid, y2) -> (x2, y2)
-    """
+    """Connects start_pt to end_pt using clean 90-degree right-angled segments."""
     x1, y1 = start_pt[0], start_pt[1]
     x2, y2 = end_pt[0], end_pt[1]
 
@@ -84,14 +81,18 @@ def extract_terms(expr, outer_cls, inner_cls):
         result.append(literals)
     return result
 
-def build_term_gate_2input(d, lits, GateCls, signal_sources, x_start, y_start, wire_channel_func):
+def build_term_gate_2input(d, lits, GateCls, rail_x_map, x_start, y_start):
+    """
+    Taps horizontal lines directly from vertical bus rails to term gate inputs
+    using explicit junction dots.
+    """
     if len(lits) == 1:
         var, neg = lits[0]
         sig_key = f"{var}'" if neg else str(var)
-        src_pt = signal_sources[sig_key]
+        rx = rail_x_map[sig_key]
         out_pt = (x_start + 1.5, y_start)
-        x_mid = wire_channel_func()
-        connect_orthogonal(d, src_pt, out_pt, x_mid)
+        d += elm.Dot().at((rx, y_start))
+        d += elm.Line().at((rx, y_start)).to(out_pt)
         return out_pt, x_start + 1.5
 
     if len(lits) == 2:
@@ -99,12 +100,14 @@ def build_term_gate_2input(d, lits, GateCls, signal_sources, x_start, y_start, w
         d += g
         for i, (var, neg) in enumerate(lits):
             sig_key = f"{var}'" if neg else str(var)
-            src_pt = signal_sources[sig_key]
+            rx = rail_x_map[sig_key]
             in_anchor = get_pin(g, f"in{i + 1}")
-            x_mid = wire_channel_func()
-            connect_orthogonal(d, src_pt, in_anchor, x_mid)
+            pin_y = in_anchor[1]
+            d += elm.Dot().at((rx, pin_y))
+            d += elm.Line().at((rx, pin_y)).to(in_anchor)
         return g.out, x_start
 
+    # len(lits) > 2: build a 2-input binary tree for multi-literal terms
     lit_anchors = []
     lit_y_step = 1.0
     base_y = y_start + (len(lits) - 1) * lit_y_step / 2.0
@@ -112,14 +115,14 @@ def build_term_gate_2input(d, lits, GateCls, signal_sources, x_start, y_start, w
     for idx, (var, neg) in enumerate(lits):
         ly = base_y - idx * lit_y_step
         sig_key = f"{var}'" if neg else str(var)
-        src_pt = signal_sources[sig_key]
-        target_pt = (x_start - 0.5, ly)
-        x_mid = wire_channel_func()
-        connect_orthogonal(d, src_pt, target_pt, x_mid)
-        lit_anchors.append((target_pt, ly))
+        rx = rail_x_map[sig_key]
+        p_out = (x_start, ly)
+        d += elm.Dot().at((rx, ly))
+        d += elm.Line().at((rx, ly)).to(p_out)
+        lit_anchors.append((p_out, ly))
 
     curr = lit_anchors
-    cx = x_start + 1.0
+    cx = x_start + 1.2
     while len(curr) > 1:
         nxt = []
         i = 0
@@ -130,10 +133,8 @@ def build_term_gate_2input(d, lits, GateCls, signal_sources, x_start, y_start, w
                 my = (y1 + y2) / 2.0
                 g = GateCls(inputs=2).at((cx, my))
                 d += g
-                x_mid1 = wire_channel_func()
-                x_mid2 = wire_channel_func()
-                connect_orthogonal(d, anc1, get_pin(g, "in1"), x_mid1)
-                connect_orthogonal(d, anc2, get_pin(g, "in2"), x_mid2)
+                connect_orthogonal(d, anc1, get_pin(g, "in1"), cx - 0.6)
+                connect_orthogonal(d, anc2, get_pin(g, "in2"), cx - 0.6)
                 nxt.append((g.out, my))
                 i += 2
             else:
@@ -145,6 +146,7 @@ def build_term_gate_2input(d, lits, GateCls, signal_sources, x_start, y_start, w
     return curr[0][0], cx - 2.5
 
 def reduce_term_outputs_2input(d, term_outputs, FinalCls, x_start, x_step=3.5):
+    """Cascades term outputs down to a single output using 2-input reduction gates."""
     current = term_outputs[:]
     curr_x = x_start
     channel_offset = 0
@@ -161,8 +163,8 @@ def reduce_term_outputs_2input(d, term_outputs, FinalCls, x_start, x_step=3.5):
                 g = FinalCls(inputs=2).at((curr_x, mid_y))
                 d += g
 
-                x_mid1 = curr_x - 1.2 + (channel_offset % 3) * 0.25
-                x_mid2 = curr_x - 1.2 + ((channel_offset + 1) % 3) * 0.25
+                x_mid1 = curr_x - 1.2 - (channel_offset % 3) * 0.3
+                x_mid2 = curr_x - 1.2 - ((channel_offset + 1) % 3) * 0.3
                 channel_offset += 2
 
                 connect_orthogonal(d, anc1, get_pin(g, "in1"), x_mid1)
@@ -182,7 +184,7 @@ def reduce_term_outputs_2input(d, term_outputs, FinalCls, x_start, x_step=3.5):
 
 def build_two_level_svg(terms, gate_type):
     d = schemdraw.Drawing()
-    row_h = 3.5
+    row_h = 3.0
 
     if gate_type == "nand":
         GateCls = logic.Nand
@@ -200,50 +202,74 @@ def build_two_level_svg(terms, gate_type):
     all_vars = sorted(list(set(str(var) for lits in terms for var, _ in lits)))
     inv_vars = sorted(list(set(str(var) for lits in terms for var, neg in lits if neg)))
 
-    wire_counter = [0]
-    def get_wire_channel():
-        ch = 2.8 + (wire_counter[0] % 8) * 0.25
-        wire_counter[0] += 1
-        return ch
+    # Compute dedicated X coordinates for vertical bus rails
+    rail_x_map = {}
+    curr_x = 0.0
+    for var in all_vars:
+        rail_x_map[var] = curr_x
+        if var in inv_vars:
+            curr_x += 2.4
+            rail_x_map[f"{var}'"] = curr_x
+            curr_x += 0.8
+        else:
+            curr_x += 0.8
 
-    signal_sources = {}
-    var_y_step = 2.5
+    x_gates = curr_x + 1.5
+    num_terms = len(terms)
+    num_vars = len(all_vars)
+    y_bottom = - (num_terms - 1) * row_h - 2.0
 
+    # Draw Variable Inputs and Vertical Bus Rails
     for idx, var in enumerate(all_vars):
-        y_var = -idx * var_y_step
+        y_head = 2.5 + (num_vars - 1 - idx) * 1.8
+        x_v = rail_x_map[var]
         x_in = -2.5
-        x_bus = 0.5
 
-        d += elm.Line().at((x_in, y_var)).to((x_bus, y_var)).label(var, loc='left')
-        signal_sources[var] = (x_bus, y_var)
+        # Horizontal feed line for raw variable
+        d += elm.Line().at((x_in, y_head)).to((x_v, y_head)).label(var, loc='left')
+        d += elm.Dot().at((x_v, y_head))
+
+        # Vertical rail line extending to bottom of diagram
+        d += elm.Line().at((x_v, y_head)).to((x_v, y_bottom))
 
         if var in inv_vars:
-            y_inv = y_var - 1.0
+            x_v_inv = rail_x_map[f"{var}'"]
             if invert_literal_via_gate:
-                g = GateCls(inputs=2).at((1.8, y_inv)).label(f"{var}'", loc='right')
+                g = GateCls(inputs=2).at((x_v + 1.4, y_head)).label(f"{var}'", loc='right')
                 d += g
-                connect_orthogonal(d, (x_bus, y_var), get_pin(g, "in1"), 1.0)
-                connect_orthogonal(d, (x_bus, y_var), get_pin(g, "in2"), 1.0)
+                in1 = get_pin(g, "in1")
+                in2 = get_pin(g, "in2")
+                branch_x = x_v + 0.4
+                d += elm.Line().at((x_v, y_head)).to((branch_x, y_head))
+                d += elm.Line().at((branch_x, y_head)).to((branch_x, in1[1]))
+                d += elm.Line().at((branch_x, in1[1])).to(in1)
+                d += elm.Line().at((branch_x, y_head)).to((branch_x, in2[1]))
+                d += elm.Line().at((branch_x, in2[1])).to(in2)
+                d += elm.Line().at(g.out).to((x_v_inv, y_head))
             else:
-                g = logic.Not().at((1.8, y_inv)).label(f"{var}'", loc='right')
+                g = logic.Not().at((x_v + 1.2, y_head)).label(f"{var}'", loc='right')
                 d += g
-                connect_orthogonal(d, (x_bus, y_var), get_pin(g, "in1"), 1.0)
+                in1 = get_pin(g, "in1")
+                d += elm.Line().at((x_v, in1[1])).to(in1)
+                d += elm.Line().at(g.out).to((x_v_inv, y_head))
 
-            signal_sources[f"{var}'"] = g.out
+            d += elm.Dot().at((x_v_inv, y_head))
+            d += elm.Line().at((x_v_inv, y_head)).to((x_v_inv, y_bottom))
 
-    x_terms = 5.5
+    # Build Term Gates
     term_outputs = []
-    max_x_term = x_terms
+    max_x_term = x_gates
 
     for idx, lits in enumerate(terms):
         y_term = -idx * row_h
         out_anchor, last_x = build_term_gate_2input(
-            d, lits, GateCls, signal_sources, x_terms, y_term, get_wire_channel
+            d, lits, GateCls, rail_x_map, x_gates, y_term
         )
         term_outputs.append((out_anchor, y_term))
         max_x_term = max(max_x_term, last_x)
 
-    x_reduction = max_x_term + 3.5
+    # Reduction Tree Output Stage
+    x_reduction = max_x_term + 3.0
 
     if len(term_outputs) == 1:
         if invert_literal_via_gate:
