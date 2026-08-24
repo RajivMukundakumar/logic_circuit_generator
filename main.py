@@ -35,85 +35,75 @@ class LogicRequest(BaseModel):
 def health_check():
     return {"status": "ok", "message": "Logic Circuit API active."}
 
-# --- Strict 2-Input NAND Tree Builder ---
-def build_2input_nand_tree(items):
-    if not items:
-        return "1"
-    if len(items) == 1:
-        return f"not ({items[0]} and {items[0]})"
-    if len(items) == 2:
-        return f"not ({items[0]} and {items[1]})"
-    mid = len(items) // 2
-    left_nand = build_2input_nand_tree(items[:mid])
-    right_nand = build_2input_nand_tree(items[mid:])
-    left_and = f"not ({left_nand} and {left_nand})"
-    right_and = f"not ({right_nand} and {right_nand})"
-    return f"not ({left_and} and {right_and})"
-
-def get_nand_literal(lit):
-    if isinstance(lit, sympy.Symbol):
-        return str(lit)
-    elif isinstance(lit, sympy.Not):
-        return f"not ({lit.args[0]} and {lit.args[0]})"
-    return str(lit)
-
-def sym_to_nand_str(expr):
-    if expr in [sympy.S.Zero, 0]:
+# --- Canonical 2-Level NAND Conversion ---
+def sym_to_nand_str(sop_expr):
+    if sop_expr in [sympy.S.Zero, 0]:
         return "0"
-    if expr in [sympy.S.One, 1]:
+    if sop_expr in [sympy.S.One, 1]:
         return "1"
-    
-    terms = expr.args if isinstance(expr, sympy.Or) else [expr]
-    not_P_terms = []
 
-    for term in terms:
+    prod_terms = sop_expr.args if isinstance(sop_expr, sympy.Or) else [sop_expr]
+    level1_nands = []
+
+    for term in prod_terms:
         if isinstance(term, sympy.And):
-            lits = [get_nand_literal(arg) for arg in term.args]
+            lits_str = []
+            for arg in term.args:
+                if isinstance(arg, sympy.Symbol):
+                    lits_str.append(str(arg))
+                elif isinstance(arg, sympy.Not):
+                    var = str(arg.args[0])
+                    lits_str.append(f"not ({var} and {var})")
+                else:
+                    lits_str.append(str(arg))
+            level1_nands.append(f"not ({' and '.join(lits_str)})")
+        elif isinstance(term, sympy.Symbol):
+            level1_nands.append(f"not ({term} and {term})")
+        elif isinstance(term, sympy.Not):
+            var = str(term.args[0])
+            level1_nands.append(var)
         else:
-            lits = [get_nand_literal(term)]
-        not_P_terms.append(build_2input_nand_tree(lits))
+            level1_nands.append(str(term))
 
-    return build_2input_nand_tree(not_P_terms)
+    if len(level1_nands) == 1:
+        return f"not ({level1_nands[0]} and {level1_nands[0]})"
 
-# --- Strict 2-Input NOR Tree Builder ---
-def build_2input_nor_tree(items):
-    if not items:
+    return f"not ({' and '.join(level1_nands)})"
+
+# --- Canonical 2-Level NOR Conversion ---
+def sym_to_nor_str(pos_expr):
+    if pos_expr in [sympy.S.Zero, 0]:
         return "0"
-    if len(items) == 1:
-        return f"not ({items[0]} or {items[0]})"
-    if len(items) == 2:
-        return f"not ({items[0]} or {items[1]})"
-    mid = len(items) // 2
-    left_nor = build_2input_nor_tree(items[:mid])
-    right_nor = build_2input_nor_tree(items[mid:])
-    left_or = f"not ({left_nor} or {left_nor})"
-    right_or = f"not ({right_nor} or {right_nor})"
-    return f"not ({left_or} or {right_or})"
-
-def get_nor_literal(lit):
-    if isinstance(lit, sympy.Symbol):
-        return str(lit)
-    elif isinstance(lit, sympy.Not):
-        return f"not ({lit.args[0]} or {lit.args[0]})"
-    return str(lit)
-
-def sym_to_nor_str(expr):
-    if expr in [sympy.S.Zero, 0]:
-        return "0"
-    if expr in [sympy.S.One, 1]:
+    if pos_expr in [sympy.S.One, 1]:
         return "1"
 
-    sum_terms = expr.args if isinstance(expr, sympy.And) else [expr]
-    not_S_terms = []
+    sum_terms = pos_expr.args if isinstance(pos_expr, sympy.And) else [pos_expr]
+    level1_nors = []
 
     for term in sum_terms:
         if isinstance(term, sympy.Or):
-            lits = [get_nor_literal(arg) for arg in term.args]
+            lits_str = []
+            for arg in term.args:
+                if isinstance(arg, sympy.Symbol):
+                    lits_str.append(str(arg))
+                elif isinstance(arg, sympy.Not):
+                    var = str(arg.args[0])
+                    lits_str.append(f"not ({var} or {var})")
+                else:
+                    lits_str.append(str(arg))
+            level1_nors.append(f"not ({' or '.join(lits_str)})")
+        elif isinstance(term, sympy.Symbol):
+            level1_nors.append(f"not ({term} or {term})")
+        elif isinstance(term, sympy.Not):
+            var = str(term.args[0])
+            level1_nors.append(var)
         else:
-            lits = [get_nor_literal(term)]
-        not_S_terms.append(build_2input_nor_tree(lits))
+            level1_nors.append(str(term))
 
-    return build_2input_nor_tree(not_S_terms)
+    if len(level1_nors) == 1:
+        return f"not ({level1_nors[0]} or {level1_nors[0]})"
+
+    return f"not ({' or '.join(level1_nors)})"
 
 def preprocess_boolean_expr(expr_str: str) -> str:
     s = expr_str.strip()
@@ -199,24 +189,23 @@ def parse_with_gemini_safe(query: str, image_b64: str, image_mime: str):
 
     if key:
         try:
-            # Using Gemini 3.6 Flash endpoint
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={key}"
             
             prompt = """
-            You are a Digital Logic Design assistant. Analyze the given logic input (word problem, photo, screenshot, truth table, or expression).
+            You are a Digital Logic Design assistant. Analyze the given logic input (word problem, photo, screenshot, truth table, or K-map).
             Perform the following tasks:
-            1. Identify all input variables and map them to uppercase letters (e.g. A, B, C, D).
+            1. Identify all input variables and map them in order (e.g. A, B, C, D).
             2. Determine all minterm decimal values where the output Y = 1.
             3. Provide an ordered, step-by-step breakdown explaining how you derived the minterm states.
 
             Respond STRICTLY in JSON format with no markdown wrappers:
             {
                 "variables": ["A", "B", "C", "D"],
-                "minterms": [1, 2, 5],
+                "minterms": [2, 3, 5, 6, 7, 13, 15],
                 "steps": [
-                    "Step 1: Identified input variables from the diagram or truth table.",
-                    "Step 2: Located all truth table rows where output Y = 1.",
-                    "Step 3: Extracted minterms as decimal indices."
+                    "Step 1: Analyzed 4-variable K-map grid with AB rows and CD columns.",
+                    "Step 2: Located all '1' cells across Gray-code indices.",
+                    "Step 3: Extracted minterms: m(2, 3, 5, 6, 7, 13, 15)."
                 ]
             }
             """
