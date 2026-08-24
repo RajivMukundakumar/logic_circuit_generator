@@ -36,12 +36,19 @@ class LogicRequest(BaseModel):
 def health_check():
     return {"status": "ok", "message": "Logic Circuit API active."}
 
+def get_pin(g, pin_name):
+    """Safely retrieves an anchor/pin from a schemdraw element across various versions."""
+    if hasattr(g, pin_name):
+        return getattr(g, pin_name)
+    if hasattr(g, 'anchors') and pin_name in g.anchors:
+        return g.anchors[pin_name]
+    if hasattr(g, 'anchors'):
+        for k, v in g.anchors.items():
+            if k.lower() == pin_name.lower():
+                return v
+    raise AttributeError(f"Anchor '{pin_name}' not defined in Element. Available: {list(getattr(g, 'anchors', {}).keys())}")
+
 def extract_terms(expr, outer_cls, inner_cls):
-    """
-    Extracts (variable, is_negated) literal lists out of a sympy SOP/POS expression.
-    SOP -> outer=Or,  inner=And
-    POS -> outer=And, inner=Or
-    """
     if expr in [sympy.S.Zero, 0, sympy.S.One, 1]:
         return None
 
@@ -63,10 +70,6 @@ def extract_terms(expr, outer_cls, inner_cls):
     return result
 
 def build_term_gate_2input(d, lits, GateCls, inverter_out, x_start, y_start):
-    """
-    Builds a term expression (AND / OR / NAND / NOR) using strictly 2-input gates.
-    Returns (output_anchor, max_x_reached).
-    """
     if len(lits) == 1:
         var, neg = lits[0]
         if neg:
@@ -80,14 +83,13 @@ def build_term_gate_2input(d, lits, GateCls, inverter_out, x_start, y_start):
         g = GateCls(inputs=2).at((x_start, y_start))
         d += g
         for i, (var, neg) in enumerate(lits):
-            in_anchor = getattr(g, f"in{i + 1}")
+            in_anchor = get_pin(g, f"in{i + 1}")
             if neg:
                 d += elm.Line().at(inverter_out[str(var)]).to(in_anchor)
             else:
                 d += elm.Line().at((x_start - 1.2, in_anchor[1])).to(in_anchor).label(str(var), loc='left')
         return g.out, x_start
 
-    # len(lits) > 2: build a 2-input binary tree for term literals
     lit_anchors = []
     lit_y_step = 0.8
     base_y = y_start + (len(lits) - 1) * lit_y_step / 2.0
@@ -114,8 +116,8 @@ def build_term_gate_2input(d, lits, GateCls, inverter_out, x_start, y_start):
                 my = (y1 + y2) / 2.0
                 g = GateCls(inputs=2).at((cx, my))
                 d += g
-                d += elm.Line().at(anc1).to(g.in1)
-                d += elm.Line().at(anc2).to(g.in2)
+                d += elm.Line().at(anc1).to(get_pin(g, "in1"))
+                d += elm.Line().at(anc2).to(get_pin(g, "in2"))
                 nxt.append((g.out, my))
                 i += 2
             else:
@@ -127,11 +129,7 @@ def build_term_gate_2input(d, lits, GateCls, inverter_out, x_start, y_start):
     return curr[0][0], cx - 2.5
 
 def reduce_term_outputs_2input(d, term_outputs, FinalCls, x_start, x_step=3.0):
-    """
-    Reduces any number of term outputs to a single final output node using
-    a binary tree composed strictly of 2-input gates (FinalCls).
-    """
-    current = term_outputs[:]  # list of (anchor, y)
+    current = term_outputs[:]
     curr_x = x_start
 
     while len(current) > 1:
@@ -146,8 +144,8 @@ def reduce_term_outputs_2input(d, term_outputs, FinalCls, x_start, x_step=3.0):
                 g = FinalCls(inputs=2).at((curr_x, mid_y))
                 d += g
 
-                d += elm.Line().at(anc1).to(g.in1)
-                d += elm.Line().at(anc2).to(g.in2)
+                d += elm.Line().at(anc1).to(get_pin(g, "in1"))
+                d += elm.Line().at(anc2).to(get_pin(g, "in2"))
 
                 next_level.append((g.out, mid_y))
                 i += 2
@@ -168,17 +166,16 @@ def build_two_level_svg(terms, gate_type):
     if gate_type == "nand":
         GateCls = logic.Nand
         FinalCls = logic.Nand
-        invert_literal_via_gate = True   # inverter = self-NAND(x,x)
+        invert_literal_via_gate = True
     elif gate_type == "nor":
         GateCls = logic.Nor
         FinalCls = logic.Nor
-        invert_literal_via_gate = True   # inverter = self-NOR(x,x)
-    else:  # standard AND/OR/NOT
+        invert_literal_via_gate = True
+    else:
         GateCls = logic.And
         FinalCls = logic.Or
-        invert_literal_via_gate = False  # inverter = real logic.Not
+        invert_literal_via_gate = False
 
-    # --- Unique variables that need a complement ---
     inv_vars, seen = [], set()
     for lits in terms:
         for var, neg in lits:
@@ -186,23 +183,21 @@ def build_two_level_svg(terms, gate_type):
                 seen.add(str(var))
                 inv_vars.append(str(var))
 
-    # --- Column 1: ONE inverter per unique variable ---
     inverter_out = {}
     y = 0
     for var in inv_vars:
         if invert_literal_via_gate:
             g = GateCls(inputs=2).at((0, y)).label(f"{var}'", loc='right')
-            d += elm.Line().at((-1.5, y + 0.3)).to(g.in1).label(var, loc='left')
-            d += elm.Line().at((-1.5, y - 0.3)).to(g.in2)
+            d += elm.Line().at((-1.5, y + 0.3)).to(get_pin(g, "in1")).label(var, loc='left')
+            d += elm.Line().at((-1.5, y - 0.3)).to(get_pin(g, "in2"))
             d += g
         else:
             g = logic.Not().at((0, y)).label(f"{var}'", loc='right')
-            d += elm.Line().at((-1.5, y)).to(g.in1).label(var, loc='left')
+            d += elm.Line().at((-1.5, y)).to(get_pin(g, "in1")).label(var, loc='left')
             d += g
         inverter_out[var] = g.out
         y -= row_h
 
-    # --- Column 2: 2-input gates per term ---
     x1 = 3.5
     term_outputs = []
     y = 0
@@ -214,15 +209,14 @@ def build_two_level_svg(terms, gate_type):
         max_x_term = max(max_x_term, last_x)
         y -= row_h
 
-    # --- Column 3: Binary tree of strictly 2-input gates combining terms ---
     x2 = max_x_term + 3.0
 
     if len(term_outputs) == 1:
         if invert_literal_via_gate:
             mid_y = term_outputs[0][1]
             final = FinalCls(inputs=2).at((x2, mid_y))
-            d += elm.Line().at(term_outputs[0][0]).to(final.in1)
-            d += elm.Line().at(term_outputs[0][0]).to(final.in2)
+            d += elm.Line().at(term_outputs[0][0]).to(get_pin(final, "in1"))
+            d += elm.Line().at(term_outputs[0][0]).to(get_pin(final, "in2"))
             d += final
             d += elm.Line().at(final.out).right().label('Y', loc='right')
         else:
