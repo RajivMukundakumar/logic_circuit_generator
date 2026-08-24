@@ -112,7 +112,8 @@ def parse_with_gemini(query: str, image_b64: str, image_mime: str):
             detail="GEMINI_API_KEY environment variable is not configured on the Render server."
         )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}"
+    # Updated to gemini-3.6-flash
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={key}"
     
     prompt = """
     You are a Digital Logic Design assistant. Analyze the given logic input (which may be a word problem, photo, screenshot, truth table, or expression).
