@@ -35,16 +35,8 @@ class LogicRequest(BaseModel):
 def health_check():
     return {"status": "ok", "message": "Logic Circuit API active."}
 
-# --- 2-Input NAND Decomposition ---
-def get_nand_literal(lit):
-    if isinstance(lit, sympy.Symbol):
-        return str(lit)
-    elif isinstance(lit, sympy.Not):
-        return f"not ({lit.args[0]} and {lit.args[0]})"
-    return str(lit)
-
-def nand_reduce(items):
-    """Computes NOT(AND(items)) strictly using 2-input NAND gates."""
+# --- Strict 2-Input NAND Tree Builder ---
+def build_2input_nand_tree(items):
     if not items:
         return "1"
     if len(items) == 1:
@@ -52,21 +44,18 @@ def nand_reduce(items):
     if len(items) == 2:
         return f"not ({items[0]} and {items[1]})"
     mid = len(items) // 2
-    left_and = and_reduce(items[:mid])
-    right_and = and_reduce(items[mid:])
+    left_nand = build_2input_nand_tree(items[:mid])
+    right_nand = build_2input_nand_tree(items[mid:])
+    left_and = f"not ({left_nand} and {left_nand})"
+    right_and = f"not ({right_nand} and {right_nand})"
     return f"not ({left_and} and {right_and})"
 
-def and_reduce(items):
-    """Computes AND(items) strictly using 2-input NAND gates."""
-    if not items:
-        return "1"
-    if len(items) == 1:
-        return items[0]
-    if len(items) == 2:
-        nand_val = f"not ({items[0]} and {items[1]})"
-        return f"not ({nand_val} and {nand_val})"
-    nand_val = nand_reduce(items)
-    return f"not ({nand_val} and {nand_val})"
+def get_nand_literal(lit):
+    if isinstance(lit, sympy.Symbol):
+        return str(lit)
+    elif isinstance(lit, sympy.Not):
+        return f"not ({lit.args[0]} and {lit.args[0]})"
+    return str(lit)
 
 def sym_to_nand_str(expr):
     if expr in [sympy.S.Zero, 0]:
@@ -75,27 +64,19 @@ def sym_to_nand_str(expr):
         return "1"
     
     terms = expr.args if isinstance(expr, sympy.Or) else [expr]
-    not_T_terms = []
+    not_P_terms = []
 
     for term in terms:
         if isinstance(term, sympy.And):
             lits = [get_nand_literal(arg) for arg in term.args]
         else:
             lits = [get_nand_literal(term)]
-        not_T_terms.append(nand_reduce(lits))
+        not_P_terms.append(build_2input_nand_tree(lits))
 
-    return nand_reduce(not_T_terms)
+    return build_2input_nand_tree(not_P_terms)
 
-# --- 2-Input NOR Decomposition ---
-def get_nor_literal(lit):
-    if isinstance(lit, sympy.Symbol):
-        return str(lit)
-    elif isinstance(lit, sympy.Not):
-        return f"not ({lit.args[0]} or {lit.args[0]})"
-    return str(lit)
-
-def nor_reduce(items):
-    """Computes NOT(OR(items)) strictly using 2-input NOR gates."""
+# --- Strict 2-Input NOR Tree Builder ---
+def build_2input_nor_tree(items):
     if not items:
         return "0"
     if len(items) == 1:
@@ -103,21 +84,18 @@ def nor_reduce(items):
     if len(items) == 2:
         return f"not ({items[0]} or {items[1]})"
     mid = len(items) // 2
-    left_or = or_reduce(items[:mid])
-    right_or = or_reduce(items[mid:])
+    left_nor = build_2input_nor_tree(items[:mid])
+    right_nor = build_2input_nor_tree(items[mid:])
+    left_or = f"not ({left_nor} or {left_nor})"
+    right_or = f"not ({right_nor} or {right_nor})"
     return f"not ({left_or} or {right_or})"
 
-def or_reduce(items):
-    """Computes OR(items) strictly using 2-input NOR gates."""
-    if not items:
-        return "0"
-    if len(items) == 1:
-        return items[0]
-    if len(items) == 2:
-        nor_val = f"not ({items[0]} or {items[1]})"
-        return f"not ({nor_val} or {nor_val})"
-    nor_val = nor_reduce(items)
-    return f"not ({nor_val} or {nor_val})"
+def get_nor_literal(lit):
+    if isinstance(lit, sympy.Symbol):
+        return str(lit)
+    elif isinstance(lit, sympy.Not):
+        return f"not ({lit.args[0]} or {lit.args[0]})"
+    return str(lit)
 
 def sym_to_nor_str(expr):
     if expr in [sympy.S.Zero, 0]:
@@ -133,9 +111,9 @@ def sym_to_nor_str(expr):
             lits = [get_nor_literal(arg) for arg in term.args]
         else:
             lits = [get_nor_literal(term)]
-        not_S_terms.append(nor_reduce(lits))
+        not_S_terms.append(build_2input_nor_tree(lits))
 
-    return nor_reduce(not_S_terms)
+    return build_2input_nor_tree(not_S_terms)
 
 def preprocess_boolean_expr(expr_str: str) -> str:
     s = expr_str.strip()
@@ -209,33 +187,43 @@ def parse_with_gemini_safe(query: str, image_b64: str, image_mime: str):
     key = os.environ.get("GEMINI_API_KEY", "")
     gemini_error = ""
 
+    if image_b64:
+        if "," in image_b64:
+            header, image_b64 = image_b64.split(",", 1)
+            if "data:" in header and ";" in header:
+                image_mime = header.split(";")[0].replace("data:", "")
+        image_b64 = re.sub(r'\s+', '', image_b64)
+
+    if not image_mime or not image_mime.startswith("image/"):
+        image_mime = "image/png"
+
     if key:
         try:
+            # Using Gemini 3.6 Flash endpoint
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={key}"
             
             prompt = """
             You are a Digital Logic Design assistant. Analyze the given logic input (word problem, photo, screenshot, truth table, or expression).
             Perform the following tasks:
-            1. Identify all input variables and map them to uppercase letters (e.g. A, B, C).
+            1. Identify all input variables and map them to uppercase letters (e.g. A, B, C, D).
             2. Determine all minterm decimal values where the output Y = 1.
-            3. Provide an ordered, step-by-step breakdown explaining how you parsed the input and derived the minterm states.
+            3. Provide an ordered, step-by-step breakdown explaining how you derived the minterm states.
 
             Respond STRICTLY in JSON format with no markdown wrappers:
             {
-                "variables": ["A", "B", "C"],
+                "variables": ["A", "B", "C", "D"],
                 "minterms": [1, 2, 5],
                 "steps": [
-                    "Step 1: Problem Definition - ...",
-                    "Step 2: Variable Identification - ...",
-                    "Step 3: Truth Table & Minterm Extraction - ...",
-                    "Step 4: Expression Reduction & Gate Mapping - ..."
+                    "Step 1: Identified input variables from the diagram or truth table.",
+                    "Step 2: Located all truth table rows where output Y = 1.",
+                    "Step 3: Extracted minterms as decimal indices."
                 ]
             }
             """
 
             parts = [{"text": prompt}]
-            if query:
-                parts.append({"text": f"User Input Query / Word Problem: {query}"})
+            if query.strip():
+                parts.append({"text": f"User Input Query: {query}"})
             if image_b64:
                 parts.append({
                     "inline_data": {
@@ -249,10 +237,10 @@ def parse_with_gemini_safe(query: str, image_b64: str, image_mime: str):
                 "generationConfig": {"response_mime_type": "application/json"}
             }
 
-            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=10)
+            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=15)
             if res.status_code == 200:
                 result_json = json.loads(res.json()["candidates"][0]["content"]["parts"][0]["text"])
-                var_symbols = [sympy.Symbol(v) for v in result_json.get("variables", ["A", "B"])]
+                var_symbols = [sympy.Symbol(v) for v in result_json.get("variables", ["A", "B", "C", "D"])]
                 minterms = result_json.get("minterms", [])
                 steps = result_json.get("steps", [])
                 return minterms, var_symbols, steps
@@ -261,21 +249,20 @@ def parse_with_gemini_safe(query: str, image_b64: str, image_mime: str):
         except Exception as e:
             gemini_error = str(e)
     else:
-        gemini_error = "GEMINI_API_KEY environment variable is not configured."
+        gemini_error = "GEMINI_API_KEY environment variable is missing or empty."
 
     raw_vars = sorted(list(set(re.findall(r'[A-Za-z]', query.upper()))))
     valid_vars = [v for v in raw_vars if v in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"][:4]
     if not valid_vars:
-        valid_vars = ["A", "B"]
+        valid_vars = ["A", "B", "C", "D"]
 
     var_symbols = [sympy.Symbol(v) for v in valid_vars]
     minterms = []  
 
     steps = [
-        f"⚠️ Gemini AI Service Offline/Bypassed: {gemini_error}",
-        "Fallback Execution: Unable to parse freeform text/image without AI model.",
-        f"Assumed default variables: {[str(v) for v in var_symbols]}.",
-        "Tip: Use direct Boolean syntax (e.g., A'B + C) or minterm notation m(0,1,2) for offline processing."
+        f"⚠️ Vision Processing Error: {gemini_error}",
+        "Fallback Execution: Unable to parse freeform text/image without API response.",
+        f"Assumed default variables: {[str(v) for v in var_symbols]}."
     ]
 
     return minterms, var_symbols, steps
@@ -334,7 +321,7 @@ def solve_logic(request: LogicRequest):
         steps = []
 
         if not query and not image_b64:
-            raise HTTPException(status_code=400, detail="Please enter text/word problem or upload an image.")
+            raise HTTPException(status_code=400, detail="Please enter text or upload an image.")
 
         minterms = None
         var_symbols = None
@@ -346,10 +333,10 @@ def solve_logic(request: LogicRequest):
             minterms, var_symbols, steps = parse_with_gemini_safe(query, image_b64, request.image_mime)
         else:
             steps = [
-                "Step 1: Direct Logic Extraction - Recognized expression, minterms, or truth table format.",
-                f"Step 2: Variable Identification - Extracted variables {[str(v) for v in var_symbols]}.",
-                f"Step 3: Minterm Analysis - Active minterm states identified at indices {minterms}.",
-                "Step 4: Truth Table & K-Map Generation - Calculated output states across all binary combinations."
+                "Step 1: Direct Parsing - Identified input minterm sequence.",
+                f"Step 2: Variable Assignment - Mapped inputs to {[str(v) for v in var_symbols]}.",
+                f"Step 3: Minterm States - Active outputs at indices {minterms}.",
+                "Step 4: Truth Table & K-Map Generation - Calculated full output matrix."
             ]
 
         num_vars = len(var_symbols)
