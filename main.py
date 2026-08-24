@@ -35,6 +35,108 @@ class LogicRequest(BaseModel):
 def health_check():
     return {"status": "ok", "message": "Logic Circuit API active."}
 
+# --- 2-Input NAND Decomposition ---
+def get_nand_literal(lit):
+    if isinstance(lit, sympy.Symbol):
+        return str(lit)
+    elif isinstance(lit, sympy.Not):
+        return f"not ({lit.args[0]} and {lit.args[0]})"
+    return str(lit)
+
+def nand_reduce(items):
+    """Computes NOT(AND(items)) strictly using 2-input NAND gates."""
+    if not items:
+        return "1"
+    if len(items) == 1:
+        return f"not ({items[0]} and {items[0]})"
+    if len(items) == 2:
+        return f"not ({items[0]} and {items[1]})"
+    mid = len(items) // 2
+    left_and = and_reduce(items[:mid])
+    right_and = and_reduce(items[mid:])
+    return f"not ({left_and} and {right_and})"
+
+def and_reduce(items):
+    """Computes AND(items) strictly using 2-input NAND gates."""
+    if not items:
+        return "1"
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        nand_val = f"not ({items[0]} and {items[1]})"
+        return f"not ({nand_val} and {nand_val})"
+    nand_val = nand_reduce(items)
+    return f"not ({nand_val} and {nand_val})"
+
+def sym_to_nand_str(expr):
+    if expr in [sympy.S.Zero, 0]:
+        return "0"
+    if expr in [sympy.S.One, 1]:
+        return "1"
+    
+    terms = expr.args if isinstance(expr, sympy.Or) else [expr]
+    not_T_terms = []
+
+    for term in terms:
+        if isinstance(term, sympy.And):
+            lits = [get_nand_literal(arg) for arg in term.args]
+        else:
+            lits = [get_nand_literal(term)]
+        not_T_terms.append(nand_reduce(lits))
+
+    return nand_reduce(not_T_terms)
+
+# --- 2-Input NOR Decomposition ---
+def get_nor_literal(lit):
+    if isinstance(lit, sympy.Symbol):
+        return str(lit)
+    elif isinstance(lit, sympy.Not):
+        return f"not ({lit.args[0]} or {lit.args[0]})"
+    return str(lit)
+
+def nor_reduce(items):
+    """Computes NOT(OR(items)) strictly using 2-input NOR gates."""
+    if not items:
+        return "0"
+    if len(items) == 1:
+        return f"not ({items[0]} or {items[0]})"
+    if len(items) == 2:
+        return f"not ({items[0]} or {items[1]})"
+    mid = len(items) // 2
+    left_or = or_reduce(items[:mid])
+    right_or = or_reduce(items[mid:])
+    return f"not ({left_or} or {right_or})"
+
+def or_reduce(items):
+    """Computes OR(items) strictly using 2-input NOR gates."""
+    if not items:
+        return "0"
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        nor_val = f"not ({items[0]} or {items[1]})"
+        return f"not ({nor_val} or {nor_val})"
+    nor_val = nor_reduce(items)
+    return f"not ({nor_val} or {nor_val})"
+
+def sym_to_nor_str(expr):
+    if expr in [sympy.S.Zero, 0]:
+        return "0"
+    if expr in [sympy.S.One, 1]:
+        return "1"
+
+    sum_terms = expr.args if isinstance(expr, sympy.And) else [expr]
+    not_S_terms = []
+
+    for term in sum_terms:
+        if isinstance(term, sympy.Or):
+            lits = [get_nor_literal(arg) for arg in term.args]
+        else:
+            lits = [get_nor_literal(term)]
+        not_S_terms.append(nor_reduce(lits))
+
+    return nor_reduce(not_S_terms)
+
 def preprocess_boolean_expr(expr_str: str) -> str:
     s = expr_str.strip()
     s = re.sub(r'\bAND\b', '&', s, flags=re.IGNORECASE)
@@ -104,7 +206,6 @@ def try_deterministic_parse(query_str: str):
     return None, None
 
 def parse_with_gemini_safe(query: str, image_b64: str, image_mime: str):
-    """Attempts Gemini parsing, but gracefully falls back if API calls fail or keys are missing."""
     key = os.environ.get("GEMINI_API_KEY", "")
     gemini_error = ""
 
@@ -162,7 +263,6 @@ def parse_with_gemini_safe(query: str, image_b64: str, image_mime: str):
     else:
         gemini_error = "GEMINI_API_KEY environment variable is not configured."
 
-    # Fallback response when Gemini fails or is bypassed
     raw_vars = sorted(list(set(re.findall(r'[A-Za-z]', query.upper()))))
     valid_vars = [v for v in raw_vars if v in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"][:4]
     if not valid_vars:
@@ -225,62 +325,6 @@ def generate_kmap_data(var_symbols, minterms):
         "grid": grid
     }
 
-def sym_to_nand_str(expr):
-    if isinstance(expr, sympy.Symbol):
-        return str(expr)
-    if isinstance(expr, sympy.Not):
-        return f"not ({expr.args[0]} and {expr.args[0]})"
-
-    def nand_literal(lit):
-        if isinstance(lit, sympy.Symbol):
-            return str(lit)
-        elif isinstance(lit, sympy.Not):
-            return f"not ({lit.args[0]} and {lit.args[0]})"
-        return str(lit)
-
-    def nand_term(term):
-        if isinstance(term, sympy.And):
-            literals = [nand_literal(arg) for arg in term.args]
-            return f"not ({' and '.join(literals)})"
-        return nand_literal(term)
-
-    if isinstance(expr, sympy.Or):
-        terms = [nand_term(arg) for arg in expr.args]
-        return f"not ({' and '.join(terms)})"
-    elif isinstance(expr, sympy.And):
-        term = nand_term(expr)
-        return f"not ({term} and {term})"
-    
-    return str(expr)
-
-def sym_to_nor_str(expr):
-    if isinstance(expr, sympy.Symbol):
-        return str(expr)
-    if isinstance(expr, sympy.Not):
-        return f"not ({expr.args[0]} or {expr.args[0]})"
-
-    def nor_literal(lit):
-        if isinstance(lit, sympy.Symbol):
-            return str(lit)
-        elif isinstance(lit, sympy.Not):
-            return f"not ({lit.args[0]} or {lit.args[0]})"
-        return str(lit)
-
-    def nor_term(term):
-        if isinstance(term, sympy.Or):
-            literals = [nor_literal(arg) for arg in term.args]
-            return f"not ({' or '.join(literals)})"
-        return nor_literal(term)
-
-    if isinstance(expr, sympy.And):
-        terms = [nor_term(arg) for arg in expr.args]
-        return f"not ({' or '.join(terms)})"
-    elif isinstance(expr, sympy.Or):
-        term = nor_term(expr)
-        return f"not ({term} or {term})"
-    
-    return str(expr)
-
 @app.post("/solve")
 def solve_logic(request: LogicRequest):
     try:
@@ -295,11 +339,9 @@ def solve_logic(request: LogicRequest):
         minterms = None
         var_symbols = None
 
-        # Attempt offline deterministic parse first
         if not image_b64:
             minterms, var_symbols = try_deterministic_parse(query)
 
-        # Fallback to Gemini (or error handling) if deterministic parsing fails
         if minterms is None or var_symbols is None:
             minterms, var_symbols, steps = parse_with_gemini_safe(query, image_b64, request.image_mime)
         else:
@@ -326,13 +368,12 @@ def solve_logic(request: LogicRequest):
         if sop_str in ["0", "1"]:
             svg_string = f"<svg width='240' height='60'><text x='20' y='35' font-family='sans-serif' font-size='16'>Output = {sop_str}</text></svg>"
         else:
-            sop_expr = SOPform(var_symbols, minterms)
             if gate_type == "nand":
-                schem_expression = sym_to_nand_str(sop_expr)
+                schem_expression = sym_to_nand_str(SOPform(var_symbols, minterms))
             elif gate_type == "nor":
                 schem_expression = sym_to_nor_str(POSform(var_symbols, minterms))
             else:
-                schem_expression = str(sop_expr).replace('&', 'and').replace('|', 'or').replace('~', 'not ')
+                schem_expression = str(SOPform(var_symbols, minterms)).replace('&', 'and').replace('|', 'or').replace('~', 'not ')
 
             try:
                 drawing = logicparse(schem_expression)
