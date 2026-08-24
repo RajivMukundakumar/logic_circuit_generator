@@ -8,7 +8,8 @@ import sympy
 from sympy.logic import SOPform, POSform
 from sympy.parsing.sympy_parser import parse_expr
 import schemdraw
-from schemdraw.parsing import logicparse
+import schemdraw.logic as logic
+import schemdraw.elements as elm
 import re
 import math
 import os
@@ -35,75 +36,203 @@ class LogicRequest(BaseModel):
 def health_check():
     return {"status": "ok", "message": "Logic Circuit API active."}
 
-# --- Canonical 2-Level NAND Conversion ---
-def sym_to_nand_str(sop_expr):
-    if sop_expr in [sympy.S.Zero, 0]:
-        return "0"
-    if sop_expr in [sympy.S.One, 1]:
-        return "1"
+def extract_terms(expr, outer_cls, inner_cls):
+    """
+    Extracts (variable, is_negated) literal lists out of a sympy SOP/POS expression.
+    SOP -> outer=Or,  inner=And
+    POS -> outer=And, inner=Or
+    """
+    if expr in [sympy.S.Zero, 0, sympy.S.One, 1]:
+        return None
 
-    prod_terms = sop_expr.args if isinstance(sop_expr, sympy.Or) else [sop_expr]
-    level1_nands = []
-
-    for term in prod_terms:
-        if isinstance(term, sympy.And):
-            lits_str = []
+    terms = expr.args if isinstance(expr, outer_cls) else [expr]
+    result = []
+    for term in terms:
+        literals = []
+        if isinstance(term, inner_cls):
             for arg in term.args:
-                if isinstance(arg, sympy.Symbol):
-                    lits_str.append(str(arg))
-                elif isinstance(arg, sympy.Not):
-                    var = str(arg.args[0])
-                    lits_str.append(f"not ({var} and {var})")
+                if isinstance(arg, sympy.Not):
+                    literals.append((arg.args[0], True))
                 else:
-                    lits_str.append(str(arg))
-            level1_nands.append(f"not ({' and '.join(lits_str)})")
-        elif isinstance(term, sympy.Symbol):
-            level1_nands.append(f"not ({term} and {term})")
+                    literals.append((arg, False))
         elif isinstance(term, sympy.Not):
-            var = str(term.args[0])
-            level1_nands.append(var)
+            literals.append((term.args[0], True))
         else:
-            level1_nands.append(str(term))
+            literals.append((term, False))
+        result.append(literals)
+    return result
 
-    if len(level1_nands) == 1:
-        return f"not ({level1_nands[0]} and {level1_nands[0]})"
-
-    return f"not ({' and '.join(level1_nands)})"
-
-# --- Canonical 2-Level NOR Conversion ---
-def sym_to_nor_str(pos_expr):
-    if pos_expr in [sympy.S.Zero, 0]:
-        return "0"
-    if pos_expr in [sympy.S.One, 1]:
-        return "1"
-
-    sum_terms = pos_expr.args if isinstance(pos_expr, sympy.And) else [pos_expr]
-    level1_nors = []
-
-    for term in sum_terms:
-        if isinstance(term, sympy.Or):
-            lits_str = []
-            for arg in term.args:
-                if isinstance(arg, sympy.Symbol):
-                    lits_str.append(str(arg))
-                elif isinstance(arg, sympy.Not):
-                    var = str(arg.args[0])
-                    lits_str.append(f"not ({var} or {var})")
-                else:
-                    lits_str.append(str(arg))
-            level1_nors.append(f"not ({' or '.join(lits_str)})")
-        elif isinstance(term, sympy.Symbol):
-            level1_nors.append(f"not ({term} or {term})")
-        elif isinstance(term, sympy.Not):
-            var = str(term.args[0])
-            level1_nors.append(var)
+def build_term_gate_2input(d, lits, GateCls, inverter_out, x_start, y_start):
+    """
+    Builds a term expression (AND / OR / NAND / NOR) using strictly 2-input gates.
+    Returns (output_anchor, max_x_reached).
+    """
+    if len(lits) == 1:
+        var, neg = lits[0]
+        if neg:
+            return inverter_out[str(var)], x_start
         else:
-            level1_nors.append(str(term))
+            p = (x_start, y_start)
+            d += elm.Line().at((x_start - 1.2, y_start)).to(p).label(str(var), loc='left')
+            return p, x_start
 
-    if len(level1_nors) == 1:
-        return f"not ({level1_nors[0]} or {level1_nors[0]})"
+    if len(lits) == 2:
+        g = GateCls(inputs=2).at((x_start, y_start))
+        d += g
+        for i, (var, neg) in enumerate(lits):
+            in_anchor = getattr(g, f"in{i + 1}")
+            if neg:
+                d += elm.Line().at(inverter_out[str(var)]).to(in_anchor)
+            else:
+                d += elm.Line().at((x_start - 1.2, in_anchor[1])).to(in_anchor).label(str(var), loc='left')
+        return g.out, x_start
 
-    return f"not ({' or '.join(level1_nors)})"
+    # len(lits) > 2: build a 2-input binary tree for term literals
+    lit_anchors = []
+    lit_y_step = 0.8
+    base_y = y_start + (len(lits) - 1) * lit_y_step / 2.0
+
+    for idx, (var, neg) in enumerate(lits):
+        ly = base_y - idx * lit_y_step
+        if neg:
+            lit_anchors.append((inverter_out[str(var)], ly))
+        else:
+            p_in = (x_start - 1.2, ly)
+            p_out = (x_start, ly)
+            d += elm.Line().at(p_in).to(p_out).label(str(var), loc='left')
+            lit_anchors.append((p_out, ly))
+
+    curr = lit_anchors
+    cx = x_start + 1.2
+    while len(curr) > 1:
+        nxt = []
+        i = 0
+        while i < len(curr):
+            if i + 1 < len(curr):
+                anc1, y1 = curr[i]
+                anc2, y2 = curr[i+1]
+                my = (y1 + y2) / 2.0
+                g = GateCls(inputs=2).at((cx, my))
+                d += g
+                d += elm.Line().at(anc1).to(g.in1)
+                d += elm.Line().at(anc2).to(g.in2)
+                nxt.append((g.out, my))
+                i += 2
+            else:
+                anc, y = curr[i]
+                nxt.append((anc, y))
+                i += 1
+        curr = nxt
+        cx += 2.5
+    return curr[0][0], cx - 2.5
+
+def reduce_term_outputs_2input(d, term_outputs, FinalCls, x_start, x_step=3.0):
+    """
+    Reduces any number of term outputs to a single final output node using
+    a binary tree composed strictly of 2-input gates (FinalCls).
+    """
+    current = term_outputs[:]  # list of (anchor, y)
+    curr_x = x_start
+
+    while len(current) > 1:
+        next_level = []
+        i = 0
+        while i < len(current):
+            if i + 1 < len(current):
+                anc1, y1 = current[i]
+                anc2, y2 = current[i+1]
+                mid_y = (y1 + y2) / 2.0
+
+                g = FinalCls(inputs=2).at((curr_x, mid_y))
+                d += g
+
+                d += elm.Line().at(anc1).to(g.in1)
+                d += elm.Line().at(anc2).to(g.in2)
+
+                next_level.append((g.out, mid_y))
+                i += 2
+            else:
+                anc, y = current[i]
+                next_level.append((anc, y))
+                i += 1
+
+        current = next_level
+        curr_x += x_step
+
+    return current[0][0], curr_x - x_step
+
+def build_two_level_svg(terms, gate_type):
+    d = schemdraw.Drawing()
+    row_h = 2.5
+
+    if gate_type == "nand":
+        GateCls = logic.Nand
+        FinalCls = logic.Nand
+        invert_literal_via_gate = True   # inverter = self-NAND(x,x)
+    elif gate_type == "nor":
+        GateCls = logic.Nor
+        FinalCls = logic.Nor
+        invert_literal_via_gate = True   # inverter = self-NOR(x,x)
+    else:  # standard AND/OR/NOT
+        GateCls = logic.And
+        FinalCls = logic.Or
+        invert_literal_via_gate = False  # inverter = real logic.Not
+
+    # --- Unique variables that need a complement ---
+    inv_vars, seen = [], set()
+    for lits in terms:
+        for var, neg in lits:
+            if neg and str(var) not in seen:
+                seen.add(str(var))
+                inv_vars.append(str(var))
+
+    # --- Column 1: ONE inverter per unique variable ---
+    inverter_out = {}
+    y = 0
+    for var in inv_vars:
+        if invert_literal_via_gate:
+            g = GateCls(inputs=2).at((0, y)).label(f"{var}'", loc='right')
+            d += elm.Line().at((-1.5, y + 0.3)).to(g.in1).label(var, loc='left')
+            d += elm.Line().at((-1.5, y - 0.3)).to(g.in2)
+            d += g
+        else:
+            g = logic.Not().at((0, y)).label(f"{var}'", loc='right')
+            d += elm.Line().at((-1.5, y)).to(g.in1).label(var, loc='left')
+            d += g
+        inverter_out[var] = g.out
+        y -= row_h
+
+    # --- Column 2: 2-input gates per term ---
+    x1 = 3.5
+    term_outputs = []
+    y = 0
+    max_x_term = x1
+
+    for lits in terms:
+        out_anchor, last_x = build_term_gate_2input(d, lits, GateCls, inverter_out, x1, y)
+        term_outputs.append((out_anchor, y))
+        max_x_term = max(max_x_term, last_x)
+        y -= row_h
+
+    # --- Column 3: Binary tree of strictly 2-input gates combining terms ---
+    x2 = max_x_term + 3.0
+
+    if len(term_outputs) == 1:
+        if invert_literal_via_gate:
+            mid_y = term_outputs[0][1]
+            final = FinalCls(inputs=2).at((x2, mid_y))
+            d += elm.Line().at(term_outputs[0][0]).to(final.in1)
+            d += elm.Line().at(term_outputs[0][0]).to(final.in2)
+            d += final
+            d += elm.Line().at(final.out).right().label('Y', loc='right')
+        else:
+            d += elm.Line().at(term_outputs[0][0]).right().label('Y', loc='right')
+        return d.get_imagedata('svg').decode('utf-8')
+
+    final_out, _ = reduce_term_outputs_2input(d, term_outputs, FinalCls, x2, x_step=3.0)
+    d += elm.Line().at(final_out).right().label('Y', loc='right')
+
+    return d.get_imagedata('svg').decode('utf-8')
 
 def preprocess_boolean_expr(expr_str: str) -> str:
     s = expr_str.strip()
@@ -111,11 +240,11 @@ def preprocess_boolean_expr(expr_str: str) -> str:
     s = re.sub(r'\bOR\b', '|', s, flags=re.IGNORECASE)
     s = re.sub(r'\bNOT\b', '~', s, flags=re.IGNORECASE)
     s = s.replace('+', '|').replace('*', '&')
-    
+
     while "'" in s:
         s = re.sub(r"([A-Za-z0-9_]+)'", r"~\1", s)
         s = re.sub(r"(\([^\(\)]+\))'", r"~\1", s)
-        
+
     pattern = r'([A-Za-z0-9_]+|\))\s*([A-Za-z0-9_~\(])'
     for _ in range(3):
         def repl(m):
@@ -123,7 +252,7 @@ def preprocess_boolean_expr(expr_str: str) -> str:
                 return m.group(0)
             return f"{m.group(1)} & {m.group(2)}"
         s = re.sub(pattern, repl, s)
-        
+
     return s
 
 def try_deterministic_parse(query_str: str):
@@ -190,7 +319,7 @@ def parse_with_gemini_safe(query: str, image_b64: str, image_mime: str):
     if key:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={key}"
-            
+
             prompt = """
             You are a Digital Logic Design assistant. Analyze the given logic input (word problem, photo, screenshot, truth table, or K-map).
             Perform the following tasks:
@@ -246,7 +375,7 @@ def parse_with_gemini_safe(query: str, image_b64: str, image_mime: str):
         valid_vars = ["A", "B", "C", "D"]
 
     var_symbols = [sympy.Symbol(v) for v in valid_vars]
-    minterms = []  
+    minterms = []
 
     steps = [
         f"⚠️ Vision Processing Error: {gemini_error}",
@@ -261,12 +390,12 @@ def generate_truth_table(var_symbols, minterms):
     headers = [str(v) for v in var_symbols] + ["Y"]
     rows = []
     minterm_set = set(minterms)
-    
+
     for i in range(2**num_vars):
         binary_str = format(i, f'0{num_vars}b')
         row_bits = [int(b) for b in binary_str]
         rows.append(row_bits + [1 if i in minterm_set else 0])
-        
+
     return {"headers": headers, "rows": rows}
 
 def generate_kmap_data(var_symbols, minterms):
@@ -274,7 +403,7 @@ def generate_kmap_data(var_symbols, minterms):
     minterm_set = set(minterms)
     gray_2 = [0, 1]
     gray_4 = [0, 1, 3, 2]
-    
+
     if n == 2:
         row_vars, col_vars = str(var_symbols[0]), str(var_symbols[1])
         row_labels, col_labels = ["0", "1"], ["0", "1"]
@@ -344,17 +473,15 @@ def solve_logic(request: LogicRequest):
         if sop_str in ["0", "1"]:
             svg_string = f"<svg width='240' height='60'><text x='20' y='35' font-family='sans-serif' font-size='16'>Output = {sop_str}</text></svg>"
         else:
-            if gate_type == "nand":
-                schem_expression = sym_to_nand_str(SOPform(var_symbols, minterms))
-            elif gate_type == "nor":
-                schem_expression = sym_to_nor_str(POSform(var_symbols, minterms))
-            else:
-                schem_expression = str(SOPform(var_symbols, minterms)).replace('&', 'and').replace('|', 'or').replace('~', 'not ')
-
             try:
-                drawing = logicparse(schem_expression)
-                svg_bytes = drawing.get_imagedata('svg')
-                svg_string = svg_bytes.decode('utf-8')
+                if gate_type == "nand":
+                    terms = extract_terms(SOPform(var_symbols, minterms), sympy.Or, sympy.And)
+                elif gate_type == "nor":
+                    terms = extract_terms(POSform(var_symbols, minterms), sympy.And, sympy.Or)
+                else:
+                    terms = extract_terms(SOPform(var_symbols, minterms), sympy.Or, sympy.And)
+
+                svg_string = build_two_level_svg(terms, gate_type)
             except Exception as e:
                 svg_string = f"<p class='text-red-500 font-mono text-sm'>Schematic generation error: {str(e)}</p>"
 
