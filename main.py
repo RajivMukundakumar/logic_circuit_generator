@@ -27,13 +27,13 @@ app.add_middleware(
 
 class LogicRequest(BaseModel):
     query: str = ""
-    image_b64: str = ""       # Base64 encoded image string
+    image_b64: str = ""
     image_mime: str = "image/png"
-    gate_type: str = "standard"  # "standard", "nand", "nor"
+    gate_type: str = "standard"
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Logic Circuit & Gemini API is active."}
+    return {"status": "ok", "message": "Logic Circuit API active."}
 
 def preprocess_boolean_expr(expr_str: str) -> str:
     s = expr_str.strip()
@@ -103,68 +103,82 @@ def try_deterministic_parse(query_str: str):
 
     return None, None
 
-def parse_with_gemini(query: str, image_b64: str, image_mime: str):
-    """Uses server environment variable GEMINI_API_KEY to process requests."""
+def parse_with_gemini_safe(query: str, image_b64: str, image_mime: str):
+    """Attempts Gemini parsing, but gracefully falls back if API calls fail or keys are missing."""
     key = os.environ.get("GEMINI_API_KEY", "")
-    if not key:
-        raise HTTPException(
-            status_code=500, 
-            detail="GEMINI_API_KEY environment variable is not configured on the Render server."
-        )
+    gemini_error = ""
 
-    # Updated to gemini-3.6-flash
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={key}"
-    
-    prompt = """
-    You are a Digital Logic Design assistant. Analyze the given logic input (which may be a word problem, photo, screenshot, truth table, or expression).
-    Perform the following tasks:
-    1. Identify all input variables and map them to uppercase letters (e.g. A, B, C).
-    2. Determine all minterm decimal values where the output Y = 1.
-    3. Provide an ordered, step-by-step breakdown explaining how you parsed the input and derived the minterm states.
+    if key:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={key}"
+            
+            prompt = """
+            You are a Digital Logic Design assistant. Analyze the given logic input (word problem, photo, screenshot, truth table, or expression).
+            Perform the following tasks:
+            1. Identify all input variables and map them to uppercase letters (e.g. A, B, C).
+            2. Determine all minterm decimal values where the output Y = 1.
+            3. Provide an ordered, step-by-step breakdown explaining how you parsed the input and derived the minterm states.
 
-    Respond STRICTLY in JSON format with no markdown wrappers:
-    {
-        "variables": ["A", "B", "C"],
-        "minterms": [1, 2, 5],
-        "steps": [
-            "Step 1: Problem Definition - ...",
-            "Step 2: Variable Identification - ...",
-            "Step 3: Truth Table & Minterm Extraction - ...",
-            "Step 4: Expression Reduction & Gate Mapping - ..."
-        ]
-    }
-    """
-
-    parts = [{"text": prompt}]
-    if query:
-        parts.append({"text": f"User Input Query / Word Problem: {query}"})
-    if image_b64:
-        parts.append({
-            "inline_data": {
-                "mime_type": image_mime,
-                "data": image_b64
+            Respond STRICTLY in JSON format with no markdown wrappers:
+            {
+                "variables": ["A", "B", "C"],
+                "minterms": [1, 2, 5],
+                "steps": [
+                    "Step 1: Problem Definition - ...",
+                    "Step 2: Variable Identification - ...",
+                    "Step 3: Truth Table & Minterm Extraction - ...",
+                    "Step 4: Expression Reduction & Gate Mapping - ..."
+                ]
             }
-        })
+            """
 
-    payload = {
-        "contents": [{"parts": parts}],
-        "generationConfig": {"response_mime_type": "application/json"}
-    }
+            parts = [{"text": prompt}]
+            if query:
+                parts.append({"text": f"User Input Query / Word Problem: {query}"})
+            if image_b64:
+                parts.append({
+                    "inline_data": {
+                        "mime_type": image_mime,
+                        "data": image_b64
+                    }
+                })
 
-    try:
-        res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=15)
-        if res.status_code != 200:
-            raise HTTPException(status_code=500, detail=f"Gemini API Error: {res.text}")
-        
-        result_json = json.loads(res.json()["candidates"][0]["content"]["parts"][0]["text"])
-        
-        var_symbols = [sympy.Symbol(v) for v in result_json.get("variables", ["A", "B"])]
-        minterms = result_json.get("minterms", [])
-        steps = result_json.get("steps", [])
-        
-        return minterms, var_symbols, steps
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to process input with Gemini: {str(e)}")
+            payload = {
+                "contents": [{"parts": parts}],
+                "generationConfig": {"response_mime_type": "application/json"}
+            }
+
+            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=10)
+            if res.status_code == 200:
+                result_json = json.loads(res.json()["candidates"][0]["content"]["parts"][0]["text"])
+                var_symbols = [sympy.Symbol(v) for v in result_json.get("variables", ["A", "B"])]
+                minterms = result_json.get("minterms", [])
+                steps = result_json.get("steps", [])
+                return minterms, var_symbols, steps
+            else:
+                gemini_error = f"Gemini API returned status code {res.status_code}: {res.text}"
+        except Exception as e:
+            gemini_error = str(e)
+    else:
+        gemini_error = "GEMINI_API_KEY environment variable is not configured."
+
+    # Fallback response when Gemini fails or is bypassed
+    raw_vars = sorted(list(set(re.findall(r'[A-Za-z]', query.upper()))))
+    valid_vars = [v for v in raw_vars if v in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"][:4]
+    if not valid_vars:
+        valid_vars = ["A", "B"]
+
+    var_symbols = [sympy.Symbol(v) for v in valid_vars]
+    minterms = []  
+
+    steps = [
+        f"⚠️ Gemini AI Service Offline/Bypassed: {gemini_error}",
+        "Fallback Execution: Unable to parse freeform text/image without AI model.",
+        f"Assumed default variables: {[str(v) for v in var_symbols]}.",
+        "Tip: Use direct Boolean syntax (e.g., A'B + C) or minterm notation m(0,1,2) for offline processing."
+    ]
+
+    return minterms, var_symbols, steps
 
 def generate_truth_table(var_symbols, minterms):
     num_vars = len(var_symbols)
@@ -281,11 +295,13 @@ def solve_logic(request: LogicRequest):
         minterms = None
         var_symbols = None
 
+        # Attempt offline deterministic parse first
         if not image_b64:
             minterms, var_symbols = try_deterministic_parse(query)
 
+        # Fallback to Gemini (or error handling) if deterministic parsing fails
         if minterms is None or var_symbols is None:
-            minterms, var_symbols, steps = parse_with_gemini(query, image_b64, request.image_mime)
+            minterms, var_symbols, steps = parse_with_gemini_safe(query, image_b64, request.image_mime)
         else:
             steps = [
                 "Step 1: Direct Logic Extraction - Recognized expression, minterms, or truth table format.",
